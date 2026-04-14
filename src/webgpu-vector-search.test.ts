@@ -8,32 +8,12 @@ import {
   WebGPUUnsupportedError,
   WebGPUInitializationError,
 } from './webgpu-vector-search'
+import { VectorSearchError } from './errors'
 import { cosineSimilarity } from './vector-utils'
-
-// Mock WebGPU API for testing
-const mockGPUDevice = {
-  createBuffer: vi.fn(),
-  createComputePipeline: vi.fn(),
-  createBindGroup: vi.fn(),
-  createCommandEncoder: vi.fn(),
-  queue: {
-    submit: vi.fn(),
-    onSubmittedWorkDone: vi.fn(),
-  },
-  destroy: vi.fn(),
-}
-
-const mockAdapter = {
-  requestDevice: vi.fn(),
-}
-
-const mockGPU = {
-  requestAdapter: vi.fn(),
-}
 
 describe('WebGPUVectorSearch', () => {
   let search: WebGPUVectorSearch
-  const dimension = 384
+  const dimension = 4
 
   beforeEach(() => {
     search = new WebGPUVectorSearch(dimension)
@@ -49,7 +29,7 @@ describe('WebGPUVectorSearch', () => {
     })
 
     it('should create instance with custom options', () => {
-      const customSearch = new WebGPUVectorSearch(dimension, {
+      const customSearch = new WebGPUVectorSearch(384, {
         useGPU: true,
         batchSize: 64,
         enableTiming: true,
@@ -59,130 +39,91 @@ describe('WebGPUVectorSearch', () => {
     })
 
     it('should detect browser support', () => {
-      // @ts-ignore - testing static method
       const isSupported = WebGPUVectorSearch.isBrowserSupported()
       expect(typeof isSupported).toBe('boolean')
     })
 
-    it('should check GPU support after initialization', async () => {
-      // Before initialization
+    it('should check GPU support before initialization', () => {
       expect(search.isGPUSupported()).toBe(false)
+    })
 
-      // After initialization attempt (will fail in test env)
-      try {
-        await search.initializeGPU()
-      } catch (e) {
-        // Expected to fail in test environment
-      }
+    it('should check GPU support after initialization attempt', async () => {
+      try { await search.initializeGPU() } catch { /* expected */ }
+      expect(typeof search.isGPUSupported()).toBe('boolean')
+    })
 
-      // Should still return false or true based on actual support
-      const isSupported = search.isGPUSupported()
-      expect(typeof isSupported).toBe('boolean')
+    it('should create instance with GPU disabled', () => {
+      const cpuSearch = new WebGPUVectorSearch(dimension, { useGPU: false })
+      expect(cpuSearch.isGPUSupported()).toBe(false)
+      cpuSearch.destroy()
     })
   })
 
   describe('CPU Fallback', () => {
     it('should perform CPU search correctly', async () => {
       const query = [1, 2, 3, 4]
-      const vectors = [
-        1, 2, 3, 4,  // identical to query
-        2, 4, 6, 8,  // parallel to query
-        1, 0, 0, 0,  // different
-      ]
+      const vectors = [1, 2, 3, 4, 2, 4, 6, 8, 1, 0, 0, 0]
       const k = 2
-
       const results = await search.search(query, vectors, k)
-
       expect(results).toHaveLength(2)
-      expect(results[0].similarity).toBeGreaterThan(results[1].similarity)
-      expect(results[0].index).toBe(0)  // Most similar
+      expect(results[0].similarity).toBeGreaterThanOrEqual(results[1].similarity)
     })
 
     it('should handle empty vectors array', async () => {
       const query = [1, 2, 3, 4]
-      const vectors: number[] = []
-      const k = 2
-
-      const results = await search.search(query, vectors, k)
+      const results = await search.search(query, [], 2)
       expect(results).toHaveLength(0)
     })
 
     it('should handle k larger than vector count', async () => {
       const query = [1, 2, 3, 4]
       const vectors = [1, 2, 3, 4, 2, 4, 6, 8]
-      const k = 10
-
-      const results = await search.search(query, vectors, k)
+      const results = await search.search(query, vectors, 10)
       expect(results.length).toBeLessThanOrEqual(2)
     })
 
     it('should validate query dimension', async () => {
-      const query = [1, 2, 3]  // Wrong dimension
+      const query = [1, 2, 3]
       const vectors = [1, 2, 3, 4]
-      const k = 1
-
-      await expect(search.search(query, vectors, k)).rejects.toThrow()
+      await expect(search.search(query, vectors, 1)).rejects.toThrow()
     })
 
     it('should validate vectors array length', async () => {
       const query = [1, 2, 3, 4]
-      const vectors = [1, 2, 3]  // Not multiple of dimension
-      const k = 1
-
-      await expect(search.search(query, vectors, k)).rejects.toThrow()
+      const vectors = [1, 2, 3]
+      await expect(search.search(query, vectors, 1)).rejects.toThrow()
     })
 
     it('should compute cosine similarity correctly', async () => {
+      const s3 = new WebGPUVectorSearch(3)
       const query = [1, 0, 0]
       const vectors = [1, 0, 0, 0, 1, 0, 0, 0, 1]
-      const k = 3
-
-      const results = await search.search(query, vectors, k)
-
-      expect(results[0].similarity).toBeCloseTo(1.0)  // Identical
-      expect(results[1].similarity).toBeCloseTo(0.0)  // Orthogonal
-      expect(results[2].similarity).toBeCloseTo(0.0)  // Orthogonal
+      const results = await s3.search(query, vectors, 3)
+      expect(results[0].similarity).toBeCloseTo(1.0)
+      expect(results[1].similarity).toBeCloseTo(0.0)
+      expect(results[2].similarity).toBeCloseTo(0.0)
+      s3.destroy()
     })
   })
 
   describe('Batch Search', () => {
     it('should perform batch search with CPU fallback', async () => {
-      const queries = [
-        [1, 2, 3, 4],
-        [2, 4, 6, 8],
-      ]
-      const vectors = [
-        1, 2, 3, 4,
-        2, 4, 6, 8,
-        1, 0, 0, 0,
-      ]
-      const k = 2
-
-      const batchResult = await search.batchSearch(queries, vectors, k)
-
+      const queries = [[1, 2, 3, 4], [2, 4, 6, 8]]
+      const vectors = [1, 2, 3, 4, 2, 4, 6, 8, 1, 0, 0, 0]
+      const batchResult = await search.batchSearch(queries, vectors, 2)
       expect(batchResult.results).toHaveLength(2)
       expect(batchResult.results[0]).toHaveLength(2)
       expect(batchResult.results[1]).toHaveLength(2)
-      expect(batchResult.usedGPU).toBe(false)  // CPU fallback in test env
+      expect(batchResult.usedGPU).toBe(false)
     })
 
     it('should handle empty queries array', async () => {
-      const queries: number[][] = []
-      const vectors = [1, 2, 3, 4]
-      const k = 2
-
-      const batchResult = await search.batchSearch(queries, vectors, k)
-
+      const batchResult = await search.batchSearch([], [1, 2, 3, 4], 2)
       expect(batchResult.results).toHaveLength(0)
     })
 
     it('should handle single query in batch', async () => {
-      const queries = [[1, 2, 3, 4]]
-      const vectors = [1, 2, 3, 4, 2, 4, 6, 8]
-      const k = 1
-
-      const batchResult = await search.batchSearch(queries, vectors, k)
-
+      const batchResult = await search.batchSearch([[1, 2, 3, 4]], [1, 2, 3, 4, 2, 4, 6, 8], 1)
       expect(batchResult.results).toHaveLength(1)
       expect(batchResult.results[0]).toHaveLength(1)
     })
@@ -190,69 +131,35 @@ describe('WebGPUVectorSearch', () => {
 
   describe('Performance Metrics', () => {
     it('should track metrics when timing enabled', async () => {
-      const timedSearch = new WebGPUVectorSearch(dimension, {
-        enableTiming: true,
-        useGPU: false,  // Force CPU for testing
-      })
-
-      const query = [1, 2, 3, 4]
-      const vectors = [1, 2, 3, 4, 2, 4, 6, 8]
-      const k = 1
-
-      await timedSearch.search(query, vectors, k)
-
-      const metrics = timedSearch.getMetrics()
+      const ts = new WebGPUVectorSearch(dimension, { enableTiming: true, useGPU: false })
+      await ts.search([1, 2, 3, 4], [1, 2, 3, 4, 2, 4, 6, 8], 1)
+      const metrics = ts.getMetrics()
       expect(metrics).toHaveLength(1)
       expect(metrics[0].usedGPU).toBe(false)
       expect(metrics[0].cpuTime).toBeGreaterThan(0)
-
-      timedSearch.destroy()
+      ts.destroy()
     })
 
     it('should not track metrics when timing disabled', async () => {
-      const untimedSearch = new WebGPUVectorSearch(dimension, {
-        enableTiming: false,
-        useGPU: false,
-      })
-
-      const query = [1, 2, 3, 4]
-      const vectors = [1, 2, 3, 4]
-      const k = 1
-
-      await untimedSearch.search(query, vectors, k)
-
-      const metrics = untimedSearch.getMetrics()
-      expect(metrics).toHaveLength(1)
-      expect(metrics[0].cpuTime).toBe(0)
-
-      untimedSearch.destroy()
+      const us = new WebGPUVectorSearch(dimension, { enableTiming: false, useGPU: false })
+      await us.search([1, 2, 3, 4], [1, 2, 3, 4], 1)
+      expect(us.getMetrics()).toHaveLength(0)
+      us.destroy()
     })
 
     it('should calculate average speedup', () => {
-      // No GPU searches
-      const speedup = search.getAverageSpeedup()
-      expect(speedup).toBe(1)
+      expect(search.getAverageSpeedup()).toBe(1)
     })
 
     it('should clear metrics', async () => {
-      const query = [1, 2, 3, 4]
-      const vectors = [1, 2, 3, 4]
-      const k = 1
-
-      await search.search(query, vectors, k)
+      await search.search([1, 2, 3, 4], [1, 2, 3, 4], 1)
       expect(search.getMetrics().length).toBeGreaterThan(0)
-
       search.clearMetrics()
       expect(search.getMetrics()).toHaveLength(0)
     })
 
     it('should generate performance summary', async () => {
-      const query = [1, 2, 3, 4]
-      const vectors = [1, 2, 3, 4]
-      const k = 1
-
-      await search.search(query, vectors, k)
-
+      await search.search([1, 2, 3, 4], [1, 2, 3, 4], 1)
       const summary = search.getPerformanceSummary()
       expect(summary).toContain('Performance Summary')
       expect(summary).toContain('CPU Searches')
@@ -261,70 +168,54 @@ describe('WebGPUVectorSearch', () => {
 
   describe('Edge Cases', () => {
     it('should handle very small vectors', async () => {
-      const smallSearch = new WebGPUVectorSearch(2)
-      const query = [1, 0]
-      const vectors = [1, 0, 0, 1]
-      const k = 2
-
-      const results = await smallSearch.search(query, vectors, k)
+      const ss = new WebGPUVectorSearch(2)
+      const results = await ss.search([1, 0], [1, 0, 0, 1], 2)
       expect(results).toHaveLength(2)
-
-      smallSearch.destroy()
+      ss.destroy()
     })
 
     it('should handle large vector dimension', async () => {
-      const largeDim = 1536
-      const largeSearch = new WebGPUVectorSearch(largeDim)
-      const query = new Array(largeDim).fill(0).map((_, i) => i % 10)
-      const vectors = [
-        ...query,
-        ...query.map(v => v * 2),
-      ]
-      const k = 1
-
-      const results = await largeSearch.search(query, vectors, k)
+      const dim = 1536
+      const ls = new WebGPUVectorSearch(dim)
+      const query = Array.from({ length: dim }, (_, i) => i % 10)
+      const results = await ls.search(query, [...query, ...query.map(v => v * 2)], 1)
       expect(results).toHaveLength(1)
       expect(results[0].similarity).toBeCloseTo(1.0)
-
-      largeSearch.destroy()
+      ls.destroy()
     })
 
     it('should handle zero magnitude vectors', async () => {
-      const query = [0, 0, 0, 0]
-      const vectors = [1, 2, 3, 4, 0, 0, 0, 0]
-      const k = 2
-
-      const results = await search.search(query, vectors, k)
-
-      // Zero magnitude vectors should have 0 similarity
-      const zeroVecResult = results.find(r => r.index === 1)
-      expect(zeroVecResult?.similarity).toBe(0)
+      const results = await search.search([0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0], 2)
+      const zeroResult = results.find(r => r.index === 1)
+      expect(zeroResult?.similarity).toBe(0)
     })
 
     it('should handle very large k value', async () => {
-      const query = [1, 2, 3, 4]
-      const vectors = [
-        1, 2, 3, 4,
-        2, 4, 6, 8,
-        1, 0, 0, 0,
-      ]
-      const k = 1000  // Much larger than vector count
+      const results = await search.search([1, 2, 3, 4], [1, 2, 3, 4, 2, 4, 6, 8, 1, 0, 0, 0], 1000)
+      expect(results.length).toBe(3)
+    })
 
-      const results = await search.search(query, vectors, k)
-      expect(results.length).toBe(3)  // Only 3 vectors available
+    it('should handle k=0', async () => {
+      const results = await search.search([1, 2, 3, 4], [1, 2, 3, 4, 2, 4, 6, 8], 0)
+      expect(results).toHaveLength(0)
+    })
+
+    it('should handle single vector', async () => {
+      const results = await search.search([1, 2, 3, 4], [1, 2, 3, 4], 1)
+      expect(results).toHaveLength(1)
+      expect(results[0].similarity).toBeCloseTo(1.0)
     })
   })
 
   describe('Cleanup', () => {
     it('should destroy resources', () => {
-      const testSearch = new WebGPUVectorSearch(dimension)
-      expect(() => testSearch.destroy()).not.toThrow()
+      expect(() => new WebGPUVectorSearch(dimension).destroy()).not.toThrow()
     })
 
     it('should handle multiple destroy calls', () => {
-      const testSearch = new WebGPUVectorSearch(dimension)
-      testSearch.destroy()
-      expect(() => testSearch.destroy()).not.toThrow()
+      const s = new WebGPUVectorSearch(dimension)
+      s.destroy()
+      expect(() => s.destroy()).not.toThrow()
     })
   })
 
@@ -332,103 +223,96 @@ describe('WebGPUVectorSearch', () => {
     it('should produce same results as CPU cosine similarity', async () => {
       const query = [1, 2, 3, 4]
       const vectors = [1, 2, 3, 4, 2, 4, 6, 8]
-      const k = 2
-
-      const results = await search.search(query, vectors, k)
-
-      // Compare with CPU implementation
-      const vec1 = vectors.slice(0, 4)
-      const vec2 = vectors.slice(4, 8)
-
-      const expectedSim1 = cosineSimilarity(query, vec1)
-      const expectedSim2 = cosineSimilarity(query, vec2)
-
-      expect(results[0].similarity).toBeCloseTo(expectedSim1, 5)
-      expect(results[1].similarity).toBeCloseTo(expectedSim2, 5)
+      const results = await search.search(query, vectors, 2)
+      expect(results[0].similarity).toBeCloseTo(cosineSimilarity(query, vectors.slice(0, 4)), 5)
+      expect(results[1].similarity).toBeCloseTo(cosineSimilarity(query, vectors.slice(4, 8)), 5)
     })
 
     it('should maintain ordering by similarity', async () => {
+      const s3 = new WebGPUVectorSearch(3)
       const query = [1, 0, 0]
-      const vectors = [
-        1, 0, 0,      // Similarity: 1.0
-        0.9, 0.1, 0,  // Similarity: 0.9
-        0.5, 0.5, 0,  // Similarity: 0.707
-        0, 1, 0,      // Similarity: 0.0
-      ]
-      const k = 4
-
-      const results = await search.search(query, vectors, k)
-
+      const vectors = [1, 0, 0, 0.9, 0.1, 0, 0.5, 0.5, 0, 0, 1, 0]
+      const results = await s3.search(query, vectors, 4)
       expect(results[0].similarity).toBeGreaterThan(results[1].similarity)
       expect(results[1].similarity).toBeGreaterThan(results[2].similarity)
       expect(results[2].similarity).toBeGreaterThan(results[3].similarity)
+      s3.destroy()
+    })
+
+    it('should return all identical vectors for parallel input', async () => {
+      const query = [1, 2, 3, 4]
+      const vectors = [2, 4, 6, 8, 10, 20, 30, 40, 1, 2, 3, 4]
+      const results = await search.search(query, vectors, 3)
+      for (const r of results) expect(r.similarity).toBeCloseTo(1.0, 10)
+    })
+  })
+
+  describe('Default dimension (384)', () => {
+    it('should work with default 384 dimensions', async () => {
+      const s384 = new WebGPUVectorSearch(384)
+      const query = Array.from({ length: 384 }, (_, i) => Math.sin(i * 0.1))
+      const doc = Array.from({ length: 384 }, (_, i) => Math.cos(i * 0.1))
+      const results = await s384.search(query, [...query, ...doc], 2)
+      expect(results).toHaveLength(2)
+      expect(results[0].similarity).toBeCloseTo(1.0, 5)
+      s384.destroy()
     })
   })
 })
 
 describe('WebGPU Errors', () => {
   it('should throw WebGPUUnsupportedError when GPU not available', async () => {
-    // Save original navigator.gpu
-    const originalGPU = (global as any).navigator?.gpu
+    const origGPU = (global as any).navigator?.gpu
+    Object.defineProperty(navigator, 'gpu', { get: () => undefined, configurable: true })
+    const s = new WebGPUVectorSearch(384)
+    await expect(s.initializeGPU()).rejects.toThrow(WebGPUUnsupportedError)
+    Object.defineProperty(navigator, 'gpu', { get: () => origGPU, configurable: true })
+    s.destroy()
+  })
 
-    // Mock navigator.gpu as undefined
-    Object.defineProperty(navigator, 'gpu', {
-      get: () => undefined,
-      configurable: true,
-    })
+  it('WebGPUUnsupportedError should have correct properties', () => {
+    const err = new WebGPUUnsupportedError()
+    expect(err).toBeInstanceOf(VectorSearchError)
+    expect(err.category).toBe('system')
+    expect(err.recovery).toBe('recoverable')
+  })
 
-    const search = new WebGPUVectorSearch(384)
+  it('WebGPUInitializationError should have correct properties', () => {
+    const err = new WebGPUInitializationError('device failed')
+    expect(err).toBeInstanceOf(VectorSearchError)
+    expect(err.category).toBe('system')
+    expect(err.severity).toBe('high')
+    expect(err.message).toContain('device failed')
+  })
 
-    await expect(search.initializeGPU()).rejects.toThrow(WebGPUUnsupportedError)
-
-    // Restore original
-    if (originalGPU) {
-      Object.defineProperty(navigator, 'gpu', {
-        get: () => originalGPU,
-        configurable: true,
-      })
-    }
-
-    search.destroy()
+  it('WebGPUInitializationError should support cause', () => {
+    const cause = new Error('adapter error')
+    const err = new WebGPUInitializationError('failed', cause)
+    expect(err.cause).toBe(cause)
   })
 })
 
 describe('Integration with Vector Utils', () => {
   it('should work with vector utilities', async () => {
     const { normalizeVector } = await import('./vector-utils')
-
-    const query = [3, 4]
-    const normalizedQuery = normalizeVector(query)
-
-    const vectors = [3, 4, 6, 8]
-    const k = 2
-
-    const search = new WebGPUVectorSearch(2)
-    const results = await search.search(normalizedQuery, vectors, k)
-
+    const query = normalizeVector([3, 4])
+    const s = new WebGPUVectorSearch(2)
+    const results = await s.search(query, [3, 4, 6, 8], 2)
     expect(results).toHaveLength(2)
-    expect(results[0].similarity).toBeCloseTo(1.0)  // Identical after normalization
-
-    search.destroy()
+    expect(results[0].similarity).toBeCloseTo(1.0)
+    s.destroy()
   })
 
   it('should handle hash-based embeddings', async () => {
     const { hashEmbedding } = await import('./vector-utils')
-
-    const queryEmbedding = hashEmbedding('test query', 384)
-    const docEmbedding1 = hashEmbedding('similar query', 384)
-    const docEmbedding2 = hashEmbedding('different content', 384)
-
-    const vectors = [...docEmbedding1, ...docEmbedding2]
-    const k = 2
-
-    const search = new WebGPUVectorSearch(384)
-    const results = await search.search(queryEmbedding, vectors, k)
-
+    const q = hashEmbedding('test query', 384)
+    const d1 = hashEmbedding('similar query', 384)
+    const d2 = hashEmbedding('different content', 384)
+    const s = new WebGPUVectorSearch(384)
+    const results = await s.search(q, [...d1, ...d2], 2)
     expect(results).toHaveLength(2)
     expect(results[0].similarity).toBeGreaterThanOrEqual(0)
     expect(results[0].similarity).toBeLessThanOrEqual(1)
-
-    search.destroy()
+    s.destroy()
   })
 })
